@@ -239,16 +239,19 @@ public class SAMLClient
     private void verifyAssertion(Assertion assertion, boolean requireSigned) throws ValidationException {
 
         // Assertion must be signed correctly
-        if (requireSigned && !assertion.isSigned()) {
-            throw new ValidationException(
-                    "Assertion must be signed");
-        }
+        if (requireSigned) {
 
-        Signature sig = assertion.getSignature();
-        try {
-            SignatureValidator.validate(sig, cred);
-        } catch (SignatureException e) {
-            throw new ValidationException("Assertion signature validation failed", e);
+            if (!assertion.isSigned()) {
+                throw new ValidationException(
+                        "Assertion must be signed");
+            }
+
+            Signature sig = assertion.getSignature();
+            try {
+                SignatureValidator.validate(sig, cred);
+            } catch (SignatureException e) {
+                throw new ValidationException("Assertion signature validation failed", e);
+            }
         }
 
         // Assertion must contain an authnstatement
