@@ -30,37 +30,64 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.zip.Deflater;
 
 import javax.xml.bind.DatatypeConverter;
 import javax.xml.bind.ValidationException;
+import javax.xml.crypto.dsig.CanonicalizationMethod;
+import javax.xml.crypto.dsig.DigestMethod;
+import javax.xml.crypto.dsig.SignatureMethod;
 import net.shibboleth.utilities.java.support.component.ComponentInitializationException;
 import net.shibboleth.utilities.java.support.xml.BasicParserPool;
 import net.shibboleth.utilities.java.support.xml.SerializeSupport;
 import net.shibboleth.utilities.java.support.xml.XMLParserException;
+import org.opensaml.core.config.ConfigurationService;
 import org.opensaml.core.xml.XMLObject;
 import org.opensaml.core.xml.io.MarshallingException;
 import org.opensaml.core.xml.io.UnmarshallingException;
 import org.opensaml.core.xml.util.XMLObjectSupport;
 import org.opensaml.saml.common.SAMLObjectBuilder;
+import org.opensaml.saml.common.SAMLRuntimeException;
+import org.opensaml.saml.common.xml.SAMLConstants;
+import org.opensaml.saml.ext.saml2alg.SigningMethod;
 import org.opensaml.saml.saml2.core.Assertion;
 import org.opensaml.saml.saml2.core.Attribute;
 import org.opensaml.saml.saml2.core.AttributeStatement;
 import org.opensaml.saml.saml2.core.Audience;
 import org.opensaml.saml.saml2.core.AudienceRestriction;
+import org.opensaml.saml.saml2.core.AuthnContextClassRef;
+import org.opensaml.saml.saml2.core.AuthnContextComparisonTypeEnumeration;
 import org.opensaml.saml.saml2.core.AuthnRequest;
 import org.opensaml.saml.saml2.core.AuthnStatement;
 import org.opensaml.saml.saml2.core.Conditions;
 import org.opensaml.saml.saml2.core.Issuer;
+import org.opensaml.saml.saml2.core.RequestedAuthnContext;
 import org.opensaml.saml.saml2.core.Response;
 import org.opensaml.saml.saml2.core.StatusCode;
 import org.opensaml.saml.saml2.core.Subject;
 import org.opensaml.saml.saml2.core.SubjectConfirmation;
 import org.opensaml.saml.saml2.core.SubjectConfirmationData;
+import org.opensaml.saml.saml2.core.impl.AuthnContextClassRefBuilder;
+import org.opensaml.saml.saml2.core.impl.RequestedAuthnContextBuilder;
+import org.opensaml.saml.saml2.core.impl.RequestedAuthnContextImpl;
 import org.opensaml.security.credential.BasicCredential;
+import org.opensaml.security.credential.Credential;
+import org.opensaml.xmlsec.EncryptionConfiguration;
+import org.opensaml.xmlsec.encryption.impl.OriginatorKeyInfoBuilder;
+import org.opensaml.xmlsec.keyinfo.KeyInfoGenerator;
+import org.opensaml.xmlsec.keyinfo.KeyInfoGeneratorManager;
+import org.opensaml.xmlsec.keyinfo.KeyInfoSupport;
+import org.opensaml.xmlsec.keyinfo.NamedKeyInfoGeneratorManager;
+import org.opensaml.xmlsec.signature.KeyInfo;
 import org.opensaml.xmlsec.signature.Signature;
+import org.opensaml.xmlsec.signature.impl.KeyInfoBuilder;
+import org.opensaml.xmlsec.signature.impl.SignatureBuilder;
+import org.opensaml.xmlsec.signature.support.SignatureConstants;
 import org.opensaml.xmlsec.signature.support.SignatureException;
 import org.opensaml.xmlsec.signature.support.SignatureValidator;
+import org.opensaml.xmlsec.signature.support.Signer;
 
 
 /**
@@ -93,6 +120,7 @@ public class SAMLClient
 
     /* do date comparisons +/- this many seconds */
     private static final int slack = 300;
+    private Credential signingCredential;
 
 
     /**
@@ -106,7 +134,7 @@ public class SAMLClient
         this.idpConfig = idpConfig;
 
         cred = new BasicCredential(idpConfig.getCert().getPublicKey());
-        cred.setEntityId(idpConfig.getEntityId());        
+        cred.setEntityId(idpConfig.getEntityId());
 
         // create xml parsers
         parsers = new BasicParserPool();
@@ -153,7 +181,7 @@ public class SAMLClient
         }
         catch (UnmarshallingException e) {
             throw new SAMLException(e);
-        }        
+        }
     }
 
     private void validate(Response response)
@@ -161,7 +189,7 @@ public class SAMLClient
     {
         // response signature must match IdP's key, if present
         Signature sig = response.getSignature();
-        if (sig != null) 
+        if (sig != null)
         {
             try {
                 SignatureValidator.validate(sig, cred);
@@ -327,7 +355,7 @@ public class SAMLClient
         throws SAMLException
     {
         SAMLObjectBuilder<AuthnRequest> builder =
-            (SAMLObjectBuilder<AuthnRequest>) 
+            (SAMLObjectBuilder<AuthnRequest>)
                 XMLObjectSupport.getBuilder(AuthnRequest.DEFAULT_ELEMENT_NAME);
 
         SAMLObjectBuilder<Issuer> issuerBuilder =
@@ -343,8 +371,24 @@ public class SAMLClient
         issuer.setValue(spConfig.getEntityId());
         request.setIssuer(issuer);
 
+        Signature signature = new SignatureBuilder().buildObject();
+        signature.setSigningCredential(signingCredential);
+        signature.setSignatureAlgorithm(SignatureConstants.ALGO_ID_SIGNATURE_RSA_SHA1);
+        signature.setCanonicalizationAlgorithm(SignatureConstants.ALGO_ID_C14N_EXCL_OMIT_COMMENTS);
+        KeyInfo keyInfo = getKeyInfo();
+        signature.setKeyInfo(keyInfo);
+
+
+        request.setSignature(signature);
+
         try {
             Element element = XMLObjectSupport.marshall(request);
+
+            try {
+                Signer.signObject(signature);
+            } catch (SignatureException ex) {
+                throw new SAMLException("Failed to sign request", ex);
+            }
 
             return SerializeSupport.nodeToString(element);
         }
@@ -459,4 +503,25 @@ public class SAMLClient
         }
         return new AttributeSet(nameId, attributes);
     }
+
+    public void setSigningCredential(Credential signingCredential) {
+        this.signingCredential = signingCredential;
+    }
+
+    private KeyInfo getKeyInfo() throws SAMLException {
+        EncryptionConfiguration encConf = ConfigurationService.get(EncryptionConfiguration.class);
+        NamedKeyInfoGeneratorManager keygenMgr = encConf.getDataKeyInfoGeneratorManager();
+
+        KeyInfoGenerator keyInfoGenerator = KeyInfoSupport.getKeyInfoGenerator(signingCredential, keygenMgr, null);
+        try {
+            return keyInfoGenerator.generate(signingCredential);
+        } catch (org.opensaml.security.SecurityException ex) {
+            String msg
+                    = "Can't obtain key from the keystore or generate key info for credential: "
+                    + signingCredential;
+
+            throw new SAMLException(msg);
+        }
+    }
+
 }
