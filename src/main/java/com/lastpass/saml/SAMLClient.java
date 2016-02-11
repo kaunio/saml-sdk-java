@@ -31,6 +31,8 @@ import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.Deflater;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterOutputStream;
 
 import javax.xml.bind.DatatypeConverter;
 import javax.xml.bind.ValidationException;
@@ -43,6 +45,7 @@ import org.opensaml.core.xml.io.MarshallingException;
 import org.opensaml.core.xml.io.UnmarshallingException;
 import org.opensaml.core.xml.util.XMLObjectSupport;
 import org.opensaml.saml.common.SAMLObjectBuilder;
+import org.opensaml.saml.common.xml.SAMLConstants;
 import org.opensaml.saml.saml2.core.Assertion;
 import org.opensaml.saml.saml2.core.Attribute;
 import org.opensaml.saml.saml2.core.AttributeStatement;
@@ -106,7 +109,7 @@ public class SAMLClient
         this.idpConfig = idpConfig;
 
         cred = new BasicCredential(idpConfig.getCert().getPublicKey());
-        cred.setEntityId(idpConfig.getEntityId());        
+        cred.setEntityId(idpConfig.getEntityId());
 
         // create xml parsers
         parsers = new BasicParserPool();
@@ -153,7 +156,7 @@ public class SAMLClient
         }
         catch (UnmarshallingException e) {
             throw new SAMLException(e);
-        }        
+        }
     }
 
     private void validate(Response response)
@@ -161,7 +164,7 @@ public class SAMLClient
     {
         // response signature must match IdP's key, if present
         Signature sig = response.getSignature();
-        if (sig != null) 
+        if (sig != null)
         {
             try {
                 SignatureValidator.validate(sig, cred);
@@ -327,7 +330,7 @@ public class SAMLClient
         throws SAMLException
     {
         SAMLObjectBuilder<AuthnRequest> builder =
-            (SAMLObjectBuilder<AuthnRequest>) 
+            (SAMLObjectBuilder<AuthnRequest>)
                 XMLObjectSupport.getBuilder(AuthnRequest.DEFAULT_ELEMENT_NAME);
 
         SAMLObjectBuilder<Issuer> issuerBuilder =
@@ -376,6 +379,17 @@ public class SAMLClient
         return bos.toByteArray();
     }
 
+    private byte[] inflate(byte[] input) throws IOException {
+        Inflater inflater = new Inflater(true);
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(2048);
+        InflaterOutputStream outputStream = new InflaterOutputStream(baos, inflater);
+        outputStream.write(input);
+        outputStream.close();
+
+        return baos.toByteArray();
+    }
+
     /**
      * Create a new AuthnRequest suitable for sending to an HTTPRedirect
      * binding endpoint on the IdP.  The SPConfig will be used to fill
@@ -413,6 +427,12 @@ public class SAMLClient
         throws SAMLException
     {
         byte[] decoded = DatatypeConverter.parseBase64Binary(authnResponse);
+        try {
+            decoded = inflate(decoded);
+        } catch (IOException ex) {
+            //Ignore this - it might be an uncompressed response
+            throw new SAMLException(ex);
+        }
         try {
             authnResponse = new String(decoded, "UTF-8");
         } catch (UnsupportedEncodingException e) {
@@ -460,4 +480,5 @@ public class SAMLClient
         }
         return new AttributeSet(nameId, attributes);
     }
+
 }
