@@ -56,18 +56,23 @@ import org.opensaml.saml.saml2.core.AudienceRestriction;
 import org.opensaml.saml.saml2.core.AuthnRequest;
 import org.opensaml.saml.saml2.core.AuthnStatement;
 import org.opensaml.saml.saml2.core.Conditions;
+import org.opensaml.saml.saml2.core.EncryptedAssertion;
 import org.opensaml.saml.saml2.core.Issuer;
 import org.opensaml.saml.saml2.core.Response;
 import org.opensaml.saml.saml2.core.StatusCode;
 import org.opensaml.saml.saml2.core.Subject;
 import org.opensaml.saml.saml2.core.SubjectConfirmation;
 import org.opensaml.saml.saml2.core.SubjectConfirmationData;
+import org.opensaml.saml.saml2.encryption.Decrypter;
 import org.opensaml.security.credential.BasicCredential;
 import org.opensaml.security.credential.Credential;
 import org.opensaml.xmlsec.EncryptionConfiguration;
+import org.opensaml.xmlsec.encryption.support.DecryptionException;
+import org.opensaml.xmlsec.encryption.support.InlineEncryptedKeyResolver;
 import org.opensaml.xmlsec.keyinfo.KeyInfoGenerator;
 import org.opensaml.xmlsec.keyinfo.KeyInfoSupport;
 import org.opensaml.xmlsec.keyinfo.NamedKeyInfoGeneratorManager;
+import org.opensaml.xmlsec.keyinfo.impl.StaticKeyInfoCredentialResolver;
 import org.opensaml.xmlsec.signature.KeyInfo;
 import org.opensaml.xmlsec.signature.Signature;
 import org.opensaml.xmlsec.signature.impl.SignatureBuilder;
@@ -218,126 +223,170 @@ public class SAMLClient
                     "Response IssueInstant is in the future");
         }
 
+        if (response.getEncryptedAssertions() != null) {
+            for (EncryptedAssertion encryptedAssertion : response.getEncryptedAssertions()) {
+                Assertion assertion = decryptEncryptedAssertion(encryptedAssertion);
+                verifyAssertion(assertion);
+            }
+        }
+
         for (Assertion assertion: response.getAssertions()) {
+            verifyAssertion(assertion);
+        }
+    }
 
-            // Assertion must be signed correctly
-            if (!assertion.isSigned())
-                throw new ValidationException(
+    private void verifyAssertion(Assertion assertion) throws ValidationException {
+
+        // Assertion must be signed correctly
+        if (!assertion.isSigned()) {
+            throw new ValidationException(
                     "Assertion must be signed");
+        }
 
-            sig = assertion.getSignature();
-            try {
-                SignatureValidator.validate(sig, cred);
-            } catch (SignatureException e) {
-                throw new ValidationException("Assertion signature validation failed", e);
-            }
+        Signature sig = assertion.getSignature();
+        try {
+            SignatureValidator.validate(sig, cred);
+        } catch (SignatureException e) {
+            throw new ValidationException("Assertion signature validation failed", e);
+        }
 
-            // Assertion must contain an authnstatement
-            // with an unexpired session
-            if (assertion.getAuthnStatements().isEmpty()) {
-                throw new ValidationException(
+        // Assertion must contain an authnstatement
+        // with an unexpired session
+        if (assertion.getAuthnStatements().isEmpty()) {
+            throw new ValidationException(
                     "Assertion should contain an AuthnStatement");
-            }
-            for (AuthnStatement as: assertion.getAuthnStatements()) {
-                DateTime sessionTime = as.getSessionNotOnOrAfter();
-                if (sessionTime != null) {
-                    DateTime exp = sessionTime.plusSeconds(slack);
-                    if (exp != null &&
-                            (now.isEqual(exp) || now.isAfter(exp)))
-                        throw new ValidationException(
-                                "AuthnStatement has expired");
+        }
+
+        DateTime now = DateTime.now();
+        for (AuthnStatement as : assertion.getAuthnStatements()) {
+            DateTime sessionTime = as.getSessionNotOnOrAfter();
+            if (sessionTime != null) {
+                DateTime exp = sessionTime.plusSeconds(slack);
+                if (exp != null && (now.isEqual(exp) || now.isAfter(exp))) {
+                    throw new ValidationException(
+                            "AuthnStatement has expired");
                 }
             }
+        }
 
-            if (assertion.getConditions() == null) {
-                throw new ValidationException(
+        if (assertion.getConditions() == null) {
+            throw new ValidationException(
                     "Assertion should contain conditions");
+        }
+
+        // Assertion IssueInstant must be within a day
+        DateTime instant = assertion.getIssueInstant();
+        if (instant != null) {
+            if (instant.isBefore(now.minusSeconds(slack))) {
+                throw new ValidationException(
+                        "Response IssueInstant is in the past");
             }
 
-            // Assertion IssueInstant must be within a day
-            DateTime instant = assertion.getIssueInstant();
-            if (instant != null) {
-                if (instant.isBefore(now.minusSeconds(slack)))
-                    throw new ValidationException(
-                        "Response IssueInstant is in the past");
-
-                if (instant.isAfter(now.plusSeconds(slack)))
-                    throw new ValidationException(
+            if (instant.isAfter(now.plusSeconds(slack))) {
+                throw new ValidationException(
                         "Response IssueInstant is in the future");
             }
+        }
 
-            // Conditions must be met by current time
-            Conditions conditions = assertion.getConditions();
-            DateTime notBefore = conditions.getNotBefore();
-            DateTime notOnOrAfter = conditions.getNotOnOrAfter();
+        // Conditions must be met by current time
+        Conditions conditions = assertion.getConditions();
+        DateTime notBefore = conditions.getNotBefore();
+        DateTime notOnOrAfter = conditions.getNotOnOrAfter();
 
-            if (notBefore == null || notOnOrAfter == null)
-                throw new ValidationException(
+        if (notBefore == null || notOnOrAfter == null) {
+            throw new ValidationException(
                     "Assertion conditions must have limits");
+        }
 
-            notBefore = notBefore.minusSeconds(slack);
-            notOnOrAfter = notOnOrAfter.plusSeconds(slack);
+        notBefore = notBefore.minusSeconds(slack);
+        notOnOrAfter = notOnOrAfter.plusSeconds(slack);
 
-            if (now.isBefore(notBefore))
-                throw new ValidationException(
+        if (now.isBefore(notBefore)) {
+            throw new ValidationException(
                     "Assertion conditions is in the future");
+        }
 
-            if (now.isEqual(notOnOrAfter) || now.isAfter(notOnOrAfter))
-                throw new ValidationException(
+        if (now.isEqual(notOnOrAfter) || now.isAfter(notOnOrAfter)) {
+            throw new ValidationException(
                     "Assertion conditions is in the past");
+        }
 
-            // If subjectConfirmationData is included, it must
-            // have a recipient that matches ACS, with a valid
-            // NotOnOrAfter
-            Subject subject = assertion.getSubject();
-            if (subject != null &&
-                !subject.getSubjectConfirmations().isEmpty()) {
-                boolean foundRecipient = false;
-                for (SubjectConfirmation sc: subject.getSubjectConfirmations()) {
-                    if (sc.getSubjectConfirmationData() == null)
-                        continue;
-
-                    SubjectConfirmationData scd = sc.getSubjectConfirmationData();
-                    if (scd.getNotOnOrAfter() != null) {
-                        DateTime chkdate = scd.getNotOnOrAfter().plusSeconds(slack);
-                        if (now.isEqual(chkdate) || now.isAfter(chkdate)) {
-                            throw new ValidationException(
-                                "SubjectConfirmationData is in the past");
-                        }
-                    }
-
-                    if (spConfig.getAcs().equals(scd.getRecipient()))
-                        foundRecipient = true;
+        // If subjectConfirmationData is included, it must
+        // have a recipient that matches ACS, with a valid
+        // NotOnOrAfter
+        Subject subject = assertion.getSubject();
+        if (subject != null && !subject.getSubjectConfirmations().isEmpty()) {
+            boolean foundRecipient = false;
+            for (SubjectConfirmation sc : subject.getSubjectConfirmations()) {
+                if (sc.getSubjectConfirmationData() == null) {
+                    continue;
                 }
 
-                if (!foundRecipient)
-                    throw new ValidationException(
+                SubjectConfirmationData scd = sc.getSubjectConfirmationData();
+                if (scd.getNotOnOrAfter() != null) {
+                    DateTime chkdate = scd.getNotOnOrAfter().plusSeconds(slack);
+                    if (now.isEqual(chkdate) || now.isAfter(chkdate)) {
+                        throw new ValidationException(
+                                "SubjectConfirmationData is in the past");
+                    }
+                }
+
+                if (spConfig.getAcs().equals(scd.getRecipient())) {
+                    foundRecipient = true;
+                }
+            }
+
+            if (!foundRecipient) {
+                throw new ValidationException(
                         "No SubjectConfirmationData found for ACS");
             }
+        }
 
-            // audience must include intended SP issuer
-            if (conditions.getAudienceRestrictions().isEmpty())
-                throw new ValidationException(
+        // audience must include intended SP issuer
+        if (conditions.getAudienceRestrictions().isEmpty()) {
+            throw new ValidationException(
                     "Assertion conditions must have audience restrictions");
+        }
 
-            // only one audience restriction supported: we can only
-            // check against the single SP.
-            if (conditions.getAudienceRestrictions().size() > 1)
-                throw new ValidationException(
+        // only one audience restriction supported: we can only
+        // check against the single SP.
+        if (conditions.getAudienceRestrictions().size() > 1) {
+            throw new ValidationException(
                     "Assertion contains multiple audience restrictions");
+        }
 
-            AudienceRestriction ar = conditions.getAudienceRestrictions()
+        AudienceRestriction ar = conditions.getAudienceRestrictions()
                 .get(0);
 
-            // at least one of the audiences must match our SP
-            boolean foundSP = false;
-            for (Audience a: ar.getAudiences()) {
-                if (spConfig.getEntityId().equals(a.getAudienceURI()))
-                    foundSP = true;
+        // at least one of the audiences must match our SP
+        boolean foundSP = false;
+        for (Audience a : ar.getAudiences()) {
+            if (spConfig.getEntityId().equals(a.getAudienceURI())) {
+                foundSP = true;
             }
-            if (!foundSP)
-                throw new ValidationException(
+        }
+        if (!foundSP) {
+            throw new ValidationException(
                     "Assertion audience does not include issuer");
+        }
+    }
+
+    private Assertion decryptEncryptedAssertion(EncryptedAssertion encryptedAssertion) throws ValidationException
+    {
+        if (spCredential != null) {
+            throw new ValidationException("Encrypted assertion but no SP credential specified");
+        }
+
+        StaticKeyInfoCredentialResolver staticKeyResolver = new StaticKeyInfoCredentialResolver(spCredential);
+        InlineEncryptedKeyResolver inlineEncryptedKeyResolver = new InlineEncryptedKeyResolver();
+
+        Decrypter decrypter = new Decrypter(null, staticKeyResolver, inlineEncryptedKeyResolver);
+        decrypter.setRootInNewDocument(true);
+
+        try {
+            return decrypter.decrypt(encryptedAssertion);
+        } catch (DecryptionException e) {
+            throw new ValidationException("Failed to decrypt encrypted assertion", e);
         }
     }
 
