@@ -39,6 +39,7 @@ import net.shibboleth.utilities.java.support.component.ComponentInitializationEx
 import net.shibboleth.utilities.java.support.xml.BasicParserPool;
 import net.shibboleth.utilities.java.support.xml.SerializeSupport;
 import net.shibboleth.utilities.java.support.xml.XMLParserException;
+import org.opensaml.core.config.ConfigurationService;
 import org.opensaml.core.xml.XMLObject;
 import org.opensaml.core.xml.io.MarshallingException;
 import org.opensaml.core.xml.io.UnmarshallingException;
@@ -59,9 +60,18 @@ import org.opensaml.saml.saml2.core.Subject;
 import org.opensaml.saml.saml2.core.SubjectConfirmation;
 import org.opensaml.saml.saml2.core.SubjectConfirmationData;
 import org.opensaml.security.credential.BasicCredential;
+import org.opensaml.security.credential.Credential;
+import org.opensaml.xmlsec.EncryptionConfiguration;
+import org.opensaml.xmlsec.keyinfo.KeyInfoGenerator;
+import org.opensaml.xmlsec.keyinfo.KeyInfoSupport;
+import org.opensaml.xmlsec.keyinfo.NamedKeyInfoGeneratorManager;
+import org.opensaml.xmlsec.signature.KeyInfo;
 import org.opensaml.xmlsec.signature.Signature;
+import org.opensaml.xmlsec.signature.impl.SignatureBuilder;
+import org.opensaml.xmlsec.signature.support.SignatureConstants;
 import org.opensaml.xmlsec.signature.support.SignatureException;
 import org.opensaml.xmlsec.signature.support.SignatureValidator;
+import org.opensaml.xmlsec.signature.support.Signer;
 
 
 /**
@@ -95,6 +105,11 @@ public class SAMLClient
     /* do date comparisons +/- this many seconds */
     private static final int slack = (int) TimeUnit.MINUTES.toSeconds(5);
 
+    private Credential spCredential;
+
+    private String canonicalizationAlgorithm = SignatureConstants.ALGO_ID_C14N_EXCL_OMIT_COMMENTS;
+    private String signatureAlgorithm = SignatureConstants.ALGO_ID_SIGNATURE_RSA_SHA256;
+
 
     /**
      * Create a new SAMLClient, using the IdPConfig for
@@ -107,7 +122,7 @@ public class SAMLClient
         this.idpConfig = idpConfig;
 
         cred = new BasicCredential(idpConfig.getCert().getPublicKey());
-        cred.setEntityId(idpConfig.getEntityId());        
+        cred.setEntityId(idpConfig.getEntityId());
 
         // create xml parsers
         parsers = new BasicParserPool();
@@ -154,7 +169,7 @@ public class SAMLClient
         }
         catch (UnmarshallingException e) {
             throw new SAMLException(e);
-        }        
+        }
     }
 
     private void validate(Response response)
@@ -162,7 +177,7 @@ public class SAMLClient
     {
         // response signature must match IdP's key, if present
         Signature sig = response.getSignature();
-        if (sig != null) 
+        if (sig != null)
         {
             try {
                 SignatureValidator.validate(sig, cred);
@@ -328,7 +343,7 @@ public class SAMLClient
         throws SAMLException
     {
         SAMLObjectBuilder<AuthnRequest> builder =
-            (SAMLObjectBuilder<AuthnRequest>) 
+            (SAMLObjectBuilder<AuthnRequest>)
                 XMLObjectSupport.getBuilder(AuthnRequest.DEFAULT_ELEMENT_NAME);
 
         SAMLObjectBuilder<Issuer> issuerBuilder =
@@ -344,8 +359,20 @@ public class SAMLClient
         issuer.setValue(spConfig.getEntityId());
         request.setIssuer(issuer);
 
+        if (spCredential != null) {
+            createAndSetSignature(request);
+        }
+
         try {
             Element element = XMLObjectSupport.marshall(request);
+
+            if (request.getSignature() != null) {
+                try {
+                    Signer.signObject(request.getSignature());
+                } catch (SignatureException ex) {
+                    throw new SAMLException("Failed to sign request", ex);
+                }
+            }
 
             return SerializeSupport.nodeToString(element);
         }
@@ -460,4 +487,68 @@ public class SAMLClient
         }
         return new AttributeSet(nameId, attributes);
     }
+
+    /**
+     * Sets the Service Provider (SP) credential. If this credential is set the login request
+     * will be signed. Also if set this credential will be used when decrypting encrypted assertions.
+     *
+     * @param signingCredential A credential instance or {@code null}.
+     */
+    public void setSPCredential(Credential signingCredential) {
+        this.spCredential = signingCredential;
+    }
+
+    /**
+     * Sets the canonicalization algorithm used when signing AuthnRequest instances.
+     * The default value is {@code http://www.w3.org/2001/10/xml-exc-c14n#}.
+     *
+     * @param canonicalizationAlgorithm
+     */
+    public void setCanonicalizationAlgorithm(String canonicalizationAlgorithm) {
+        this.canonicalizationAlgorithm = canonicalizationAlgorithm;
+    }
+
+    /**
+     * Sets the signing algorithm used when signing AuthnRequest instances.
+     * The default value is {@code http://www.w3.org/2001/04/xmldsig-more#rsa-sha256}.
+     *
+     * @param signatureAlgorithm A String with a valid XML Signature 1.0/1.1 signature algorithm
+     *
+     * @see SignatureConstants
+     */
+    public void setSignatureAlgorithm(String signatureAlgorithm) {
+        this.signatureAlgorithm = signatureAlgorithm;
+    }
+
+
+
+    private void createAndSetSignature(AuthnRequest request) throws SAMLException {
+        Signature signature = new SignatureBuilder().buildObject();
+        signature.setSigningCredential(spCredential);
+        signature.setSignatureAlgorithm(signatureAlgorithm);
+        signature.setCanonicalizationAlgorithm(canonicalizationAlgorithm);
+        KeyInfo keyInfo = getKeyInfo();
+        signature.setKeyInfo(keyInfo);
+
+        request.setSignature(signature);
+    }
+
+    private KeyInfo getKeyInfo() throws SAMLException {
+        EncryptionConfiguration encConf = ConfigurationService.get(EncryptionConfiguration.class);
+        NamedKeyInfoGeneratorManager keygenMgr = encConf.getDataKeyInfoGeneratorManager();
+
+        KeyInfoGenerator keyInfoGenerator = KeyInfoSupport.getKeyInfoGenerator(spCredential,
+                keygenMgr, null);
+
+        try {
+            return keyInfoGenerator.generate(spCredential);
+        } catch (org.opensaml.security.SecurityException ex) {
+            String msg
+                    = "Can't obtain key from the keystore or generate key info for credential: "
+                    + spCredential;
+
+            throw new SAMLException(msg);
+        }
+    }
+
 }
