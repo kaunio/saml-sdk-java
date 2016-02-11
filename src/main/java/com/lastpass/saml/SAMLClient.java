@@ -120,7 +120,11 @@ public class SAMLClient
 
     /* do date comparisons +/- this many seconds */
     private static final int slack = 300;
-    private Credential signingCredential;
+
+    private Credential spCredential;
+
+    private String canonicalizationAlgorithm = SignatureConstants.ALGO_ID_C14N_EXCL_OMIT_COMMENTS;
+    private String signatureAlgorithm = SignatureConstants.ALGO_ID_SIGNATURE_RSA_SHA256;
 
 
     /**
@@ -371,23 +375,19 @@ public class SAMLClient
         issuer.setValue(spConfig.getEntityId());
         request.setIssuer(issuer);
 
-        Signature signature = new SignatureBuilder().buildObject();
-        signature.setSigningCredential(signingCredential);
-        signature.setSignatureAlgorithm(SignatureConstants.ALGO_ID_SIGNATURE_RSA_SHA1);
-        signature.setCanonicalizationAlgorithm(SignatureConstants.ALGO_ID_C14N_EXCL_OMIT_COMMENTS);
-        KeyInfo keyInfo = getKeyInfo();
-        signature.setKeyInfo(keyInfo);
-
-
-        request.setSignature(signature);
+        if (spCredential != null) {
+            createAndSetSignature(request);
+        }
 
         try {
             Element element = XMLObjectSupport.marshall(request);
 
-            try {
-                Signer.signObject(signature);
-            } catch (SignatureException ex) {
-                throw new SAMLException("Failed to sign request", ex);
+            if (request.getSignature() != null) {
+                try {
+                    Signer.signObject(request.getSignature());
+                } catch (SignatureException ex) {
+                    throw new SAMLException("Failed to sign request", ex);
+                }
             }
 
             return SerializeSupport.nodeToString(element);
@@ -504,21 +504,64 @@ public class SAMLClient
         return new AttributeSet(nameId, attributes);
     }
 
-    public void setSigningCredential(Credential signingCredential) {
-        this.signingCredential = signingCredential;
+    /**
+     * Sets the Service Provider (SP) credential. If this credential is set the login request
+     * will be signed. Also if set this credential will be used when decrypting encrypted assertions.
+     *
+     * @param signingCredential A credential instance or {@code null}.
+     */
+    public void setSPCredential(Credential signingCredential) {
+        this.spCredential = signingCredential;
+    }
+
+    /**
+     * Sets the canonicalization algorithm used when signing AuthnRequest instances.
+     * The default value is {@code http://www.w3.org/2001/10/xml-exc-c14n#}.
+     *
+     * @param canonicalizationAlgorithm
+     */
+    public void setCanonicalizationAlgorithm(String canonicalizationAlgorithm) {
+        this.canonicalizationAlgorithm = canonicalizationAlgorithm;
+    }
+
+    /**
+     * Sets the signing algorithm used when signing AuthnRequest instances.
+     * The default value is {@code http://www.w3.org/2001/04/xmldsig-more#rsa-sha256}.
+     *
+     * @param signatureAlgorithm A String with a valid XML Signature 1.0/1.1 signature algorithm
+     *
+     * @see SignatureConstants
+     */
+    public void setSignatureAlgorithm(String signatureAlgorithm) {
+        this.signatureAlgorithm = signatureAlgorithm;
+    }
+
+
+
+    private void createAndSetSignature(AuthnRequest request) throws SAMLException {
+        Signature signature = new SignatureBuilder().buildObject();
+        signature.setSigningCredential(spCredential);
+        signature.setSignatureAlgorithm(signatureAlgorithm);
+        signature.setCanonicalizationAlgorithm(canonicalizationAlgorithm);
+        KeyInfo keyInfo = getKeyInfo();
+        signature.setKeyInfo(keyInfo);
+
+        request.setSignature(signature);
     }
 
     private KeyInfo getKeyInfo() throws SAMLException {
         EncryptionConfiguration encConf = ConfigurationService.get(EncryptionConfiguration.class);
         NamedKeyInfoGeneratorManager keygenMgr = encConf.getDataKeyInfoGeneratorManager();
 
-        KeyInfoGenerator keyInfoGenerator = KeyInfoSupport.getKeyInfoGenerator(signingCredential, keygenMgr, null);
+        KeyInfoGenerator keyInfoGenerator = KeyInfoSupport.getKeyInfoGenerator(spCredential,
+                keygenMgr, null);
+
         try {
-            return keyInfoGenerator.generate(signingCredential);
+            return keyInfoGenerator.generate(spCredential);
         } catch (org.opensaml.security.SecurityException ex) {
             String msg
                     = "Can't obtain key from the keystore or generate key info for credential: "
-                    + signingCredential;
+                    + spCredential;
 
             throw new SAMLException(msg);
         }
