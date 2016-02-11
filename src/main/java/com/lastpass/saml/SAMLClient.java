@@ -373,7 +373,7 @@ public class SAMLClient
 
     private Assertion decryptEncryptedAssertion(EncryptedAssertion encryptedAssertion) throws ValidationException
     {
-        if (spCredential != null) {
+        if (spCredential == null) {
             throw new ValidationException("Encrypted assertion but no SP credential specified");
         }
 
