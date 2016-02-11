@@ -226,19 +226,20 @@ public class SAMLClient
         if (response.getEncryptedAssertions() != null) {
             for (EncryptedAssertion encryptedAssertion : response.getEncryptedAssertions()) {
                 Assertion assertion = decryptEncryptedAssertion(encryptedAssertion);
-                verifyAssertion(assertion);
+                //Don't need to be signed if the whole assertion is encrypted
+                verifyAssertion(assertion, false);
             }
         }
 
         for (Assertion assertion: response.getAssertions()) {
-            verifyAssertion(assertion);
+            verifyAssertion(assertion, true);
         }
     }
 
-    private void verifyAssertion(Assertion assertion) throws ValidationException {
+    private void verifyAssertion(Assertion assertion, boolean requireSigned) throws ValidationException {
 
         // Assertion must be signed correctly
-        if (!assertion.isSigned()) {
+        if (requireSigned && !assertion.isSigned()) {
             throw new ValidationException(
                     "Assertion must be signed");
         }
