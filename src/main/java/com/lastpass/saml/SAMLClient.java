@@ -32,6 +32,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
+import java.util.zip.Inflater;
+import java.util.zip.InflaterOutputStream;
 
 import javax.xml.bind.DatatypeConverter;
 import javax.xml.bind.ValidationException;
@@ -45,6 +47,7 @@ import org.opensaml.core.xml.io.MarshallingException;
 import org.opensaml.core.xml.io.UnmarshallingException;
 import org.opensaml.core.xml.util.XMLObjectSupport;
 import org.opensaml.saml.common.SAMLObjectBuilder;
+import org.opensaml.saml.common.xml.SAMLConstants;
 import org.opensaml.saml.saml2.core.Assertion;
 import org.opensaml.saml.saml2.core.Attribute;
 import org.opensaml.saml.saml2.core.AttributeStatement;
@@ -354,6 +357,7 @@ public class SAMLClient
         request.setDestination(idpConfig.getLoginUrl().toString());
         request.setIssueInstant(new DateTime());
         request.setID(requestId);
+        request.setProtocolBinding(SAMLConstants.SAML2_REDIRECT_BINDING_URI);
 
         Issuer issuer = issuerBuilder.buildObject();
         issuer.setValue(spConfig.getEntityId());
@@ -403,6 +407,17 @@ public class SAMLClient
         return bos.toByteArray();
     }
 
+    private byte[] inflate(byte[] input) throws IOException {
+        Inflater inflater = new Inflater(true);
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(2048);
+        InflaterOutputStream outputStream = new InflaterOutputStream(baos, inflater);
+        outputStream.write(input);
+        outputStream.close();
+
+        return baos.toByteArray();
+    }
+
     /**
      * Create a new AuthnRequest suitable for sending to an HTTPRedirect
      * binding endpoint on the IdP.  The SPConfig will be used to fill
@@ -440,6 +455,12 @@ public class SAMLClient
         throws SAMLException
     {
         byte[] decoded = DatatypeConverter.parseBase64Binary(authnResponse);
+        try {
+            decoded = inflate(decoded);
+        } catch (IOException ex) {
+            //Ignore this - it might be an uncompressed response
+            throw new SAMLException(ex);
+        }
         try {
             authnResponse = new String(decoded, "UTF-8");
         } catch (UnsupportedEncodingException e) {
