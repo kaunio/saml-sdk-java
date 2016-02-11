@@ -338,6 +338,7 @@ public class SAMLClient
         request.setDestination(idpConfig.getLoginUrl().toString());
         request.setIssueInstant(new DateTime());
         request.setID(requestId);
+        request.setProtocolBinding(SAMLConstants.SAML2_REDIRECT_BINDING_URI);
 
         Issuer issuer = issuerBuilder.buildObject();
         issuer.setValue(spConfig.getEntityId());
