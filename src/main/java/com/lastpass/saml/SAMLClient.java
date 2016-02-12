@@ -180,7 +180,7 @@ public class SAMLClient
         }
     }
 
-    private void validate(Response response)
+    private Assertion validate(Response response)
         throws ValidationException
     {
         // response signature must match IdP's key, if present
@@ -228,12 +228,16 @@ public class SAMLClient
                 Assertion assertion = decryptEncryptedAssertion(encryptedAssertion);
                 //Don't need to be signed if the whole assertion is encrypted
                 verifyAssertion(assertion, false);
+                return assertion;
             }
         }
 
         for (Assertion assertion: response.getAssertions()) {
             verifyAssertion(assertion, true);
+            return assertion;
         }
+
+        return null;
     }
 
     private void verifyAssertion(Assertion assertion, boolean requireSigned) throws ValidationException {
@@ -410,7 +414,7 @@ public class SAMLClient
         request.setDestination(idpConfig.getLoginUrl().toString());
         request.setIssueInstant(new DateTime());
         request.setID(requestId);
-        request.setProtocolBinding(SAMLConstants.SAML2_REDIRECT_BINDING_URI);
+        //request.setProtocolBinding(SAMLConstants.SAML2_REDIRECT_BINDING_URI);
 
         Issuer issuer = issuerBuilder.buildObject();
         issuer.setValue(spConfig.getEntityId());
@@ -477,9 +481,30 @@ public class SAMLClient
      * in the ACS and issuer, and the IdP will be used to set the
      * destination.
      *
+     * <p>
+     * This method produces the same result as {@code generateAuthnRequest(requestId, true)}.
+     * </p>
+     *
      * @return a deflated, base64-encoded AuthnRequest
      */
     public String generateAuthnRequest(String requestId)
+        throws SAMLException
+    {
+        return generateAuthnRequest(requestId, true);
+    }
+
+    /**
+     * Create a new AuthnRequest suitable for sending to an HTTPRedirect
+     * binding endpoint on the IdP.  The SPConfig will be used to fill
+     * in the ACS and issuer, and the IdP will be used to set the
+     * destination.
+     *
+     * @param requestId A unique request id. Must not start with a digit.
+     * @param compress True if AuthnRequest should be compressed/deflated; false otherwise.
+     *
+     * @return A base64-encoded request string.
+     */
+    public String generateAuthnRequest(String requestId, boolean compress)
         throws SAMLException
     {
         String request = createAuthnRequest(requestId);
@@ -512,7 +537,6 @@ public class SAMLClient
             decoded = inflate(decoded);
         } catch (IOException ex) {
             //Ignore this - it might be an uncompressed response
-            throw new SAMLException(ex);
         }
         try {
             authnResponse = new String(decoded, "UTF-8");
@@ -522,18 +546,12 @@ public class SAMLClient
 
         Response response = parseResponse(authnResponse);
 
+        Assertion assertion;
         try {
-            validate(response);
+            assertion = validate(response);
         } catch (ValidationException e) {
             throw new SAMLException(e);
         }
-
-        // we only look at first assertion
-        if (response.getAssertions().size() != 1) {
-            throw new SAMLException(
-                "Response should have a single assertion.");
-        }
-        Assertion assertion = response.getAssertions().get(0);
 
         Subject subject = assertion.getSubject();
         if (subject == null) {
